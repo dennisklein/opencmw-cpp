@@ -66,22 +66,26 @@ public:
     virtual void                     request(Command &) = 0;
 };
 
+struct ClientLookup {};
+
 /*
  * ClientContext manages different ClientCtxBase implementations for different protocols and provides a unified API to
  * perform requests on them. Requests can be issued by any thread, because the communication is decoupled using a command disruptor.
  * The requests take a lambda which is used to return the result by the different implementations. This callback should be non-blocking
  * because it might be called from an event loop.
  */
+template<typename... Args>
 class ClientContext {
     std::vector<std::unique_ptr<ClientBase>>                            _contexts;
     std::shared_ptr<CmdBufferType>                                      _commandRingBuffer;
     std::shared_ptr<CmdPollerType>                                      _cmdPoller;
     std::unordered_map<std::string, std::reference_wrapper<ClientBase>> _schemeContexts;
     std::jthread                                                        _poller; // thread polling all the sockets
+    std::tuple<Args...>                                                 _defaultArguments;
 
 public:
-    explicit ClientContext(std::vector<std::unique_ptr<ClientBase>> &&implementations)
-        : _contexts(std::move(implementations)), _commandRingBuffer{ std::make_shared<CmdBufferType>() }, _cmdPoller{ _commandRingBuffer->newPoller() } {
+    explicit ClientContext(Args... args)
+        : _commandRingBuffer{ std::make_shared<CmdBufferType>() }, _cmdPoller{ _commandRingBuffer->newPoller() }, _defaultArguments{ args... } {
         _commandRingBuffer->addGatingSequences({ _cmdPoller->sequence() });
         _poller = std::jthread([this](const std::stop_token &stopToken) { this->poll(stopToken); });
         for (auto &ctx : _contexts) {
@@ -92,7 +96,17 @@ public:
     }
 
     // user interface: can be called from any thread and will return non-blocking after submitting the job to the job queue disruptor
-    void get(const URI<STRICT> &endpoint, std::function<void(const RawMessage &)> &&callback) { queueCommand(Command::Type::Get, endpoint, std::move(callback)); }
+    template<typename Func, typename ClientType = ClientLookup, typename... ClientArgs>                        // todo: default to ClientType = ClientLookup
+    requires std::is_same_v<ClientLookup, ClientType> || requires(ClientArgs... args) { ClientType(args...); } // todo: allow missing arguments when specified in default arguments
+    void get(const URI<STRICT> &endpoint, std::function<void(const RawMessage &)> &&callback, ClientArgs... args) {
+        if constexpr (std::is_same_v<ClientLookup, ClientType>) {
+            queueCommand(Command::Type::Get, endpoint, std::move(callback));
+        } else {
+            ClientType client = ClientType(args...);
+            queueCommand(Command::Type::Get, endpoint, std::move(callback), std::move(client));
+        }
+    }
+
     void set(const URI<STRICT> &endpoint, std::function<void(const RawMessage &)> &&callback, std::vector<std::byte> &&data) { queueCommand(Command::Type::Set, endpoint, std::move(callback), std::move(data)); }
     void subscribe(const URI<STRICT> &endpoint) { queueCommand(Command::Type::Subscribe, endpoint); }
     void subscribe(const URI<STRICT> &endpoint, std::function<void(const RawMessage &)> &&callback) { queueCommand(Command::Type::Subscribe, endpoint, std::move(callback)); }
