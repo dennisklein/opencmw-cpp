@@ -106,3 +106,8 @@ jobs:
       working-directory: ${{ runner.workspace }}/build
       shell: bash
       run: bash <(curl -Ls https://coverage.codacy.com/get.sh) report -r coverage.xml --skip --project-token ${{ secrets.CODACY_PROJECT_TOKEN }}
+
+    - name: Install
+      shell: bash
+      # Make sure the installation routine succeeds
+      run: cmake --install ../build --prefix ../install --config ${{ matrix.cmake-build-type }}
